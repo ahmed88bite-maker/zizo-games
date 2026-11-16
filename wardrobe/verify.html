@@ -1,0 +1,50 @@
+<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>التحقق من كوبون — رتّبي دولابك</title>
+<script>
+/* لازم يطابقوا القيم اللي في index.html (DEMO) */
+const COUPON_SECRET = "ZZ-DEMO-SECRET-CHANGE-ME";
+const COUPON_VALID_DAYS = 30;
+</script>
+<script>/* ===== كوبونات: توليد + تحقق (DEMO) =====
+   الشكل: ZZ-XXXX-XXXX-XXXX  =  4 عشوائي + 2 يوم الإصدار + 2 القيمة بالدرهم + 4 checksum
+   الـ checksum = FNV-1a(COUPON_SECRET + "|" + أول 8 حروف) — أي تعديل في الكود بيبوّظ الـ checksum.
+   ⚠️ السر موجود في ملف العميل، فده بيكشف التزوير العادي بس؛ للاستخدام الحقيقي اعمل التحقق على سيرفر بسر مختلف. */
+const CPN_ALPH = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+const CPN_EPOCH = Date.UTC(2026, 0, 1);
+function cpnFnv(s){ let h = 0x811c9dc5; for (let i=0;i<s.length;i++){ h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; } return h; }
+function cpnEnc(n, len){ let s=""; for (let i=0;i<len;i++){ s = CPN_ALPH[n % 32] + s; n = Math.floor(n/32); } return s; }
+function cpnDec(s){ let n=0; for (const c of s){ const v = CPN_ALPH.indexOf(c); if (v<0) return -1; n = n*32+v; } return n; }
+function cpnCheck(body){ return cpnEnc(cpnFnv(COUPON_SECRET + "|" + body) % (32**4), 4); }
+function makeCouponCode(valueAED, date){
+  const day = Math.max(0, Math.floor(((date||Date.now()) - CPN_EPOCH)/864e5));
+  const body = cpnEnc(Math.floor(Math.random()*32**4),4) + cpnEnc(day,2) + cpnEnc(Math.round(valueAED),2);
+  const raw = body + cpnCheck(body);
+  return "ZZ-" + raw.slice(0,4) + "-" + raw.slice(4,8) + "-" + raw.slice(8);
+}
+/* verifyCoupon("ZZ-....") → {valid, reason?, valueAED, issued, expires, expired} */
+function verifyCoupon(code){
+  const m = /^ZZ-([0-9A-Z]{4})-([0-9A-Z]{4})-([0-9A-Z]{4})$/.exec(String(code||"").trim().toUpperCase());
+  if (!m) return { valid:false, reason:"format" };
+  const raw = m[1]+m[2]+m[3], body = raw.slice(0,8);
+  if ([...raw].some(c => CPN_ALPH.indexOf(c) < 0)) return { valid:false, reason:"format" };
+  if (cpnCheck(body) !== raw.slice(8)) return { valid:false, reason:"checksum" };
+  const day = cpnDec(raw.slice(4,6)), valueAED = cpnDec(raw.slice(6,8));
+  const issued = new Date(CPN_EPOCH + day*864e5), expires = new Date(issued.getTime() + COUPON_VALID_DAYS*864e5);
+  return { valid:true, valueAED, issued, expires, expired: Date.now() > expires.getTime() + 864e5 };
+}
+</script>
+<style>body{font-family:system-ui,"Noto Sans Arabic",sans-serif;background:#fbeff4;color:#4a2140;display:flex;justify-content:center;padding:30px 14px}
+.c{background:#fff;border-radius:20px;padding:22px;max-width:420px;width:100%;box-shadow:0 10px 30px #0001}
+input{width:100%;font-size:20px;padding:12px;border-radius:12px;border:2px solid #e9c6d8;direction:ltr;text-align:center;letter-spacing:1px;box-sizing:border-box}
+button{margin-top:12px;width:100%;font-size:18px;padding:12px;border:0;border-radius:12px;background:#ff4f8b;color:#fff;font-weight:800}
+#out{margin-top:16px;font-size:17px;line-height:1.8}.ok{color:#1c8a4a}.bad{color:#c62a3a}</style></head>
+<body><div class="c"><h2>🔎 التحقق من كوبون</h2><p>اكتب الكود اللي بعته العميل:</p>
+<input id="code" placeholder="ZZ-XXXX-XXXX-XXXX" autocomplete="off"><button id="go">تحقّق</button><div id="out"></div></div>
+<script>
+const fmt = d => d.toLocaleDateString("ar-EG",{year:"numeric",month:"long",day:"numeric"});
+document.getElementById("go").onclick = () => {
+  const r = verifyCoupon(document.getElementById("code").value), o = document.getElementById("out");
+  if (!r.valid) { o.innerHTML = `<b class="bad">❌ الكود ده مش صحيح${r.reason==="checksum"?" (مزوّر أو فيه حرف غلط)":" (الشكل غلط)"}</b>`; return; }
+  o.innerHTML = `<b class="${r.expired?'bad':'ok'}">${r.expired?'⚠️ الكود صحيح بس منتهي':'✅ كود صحيح'}</b><br>القيمة: <b>${r.valueAED} درهم</b><br>اتعمل: ${fmt(r.issued)}<br>بينتهي: ${fmt(r.expires)}`;
+};
+</script></body></html>
