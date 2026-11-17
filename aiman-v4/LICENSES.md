@@ -9,6 +9,9 @@ Downloaded from the creators' official distribution pages (quaternius.com / kenn
 | assets/anim1.glb | Universal Animation Library (Standard): Sprint_Loop, Jog_Fwd_Loop, Jump_Start/Loop/Land, Roll, Idle_Loop, Hit_Chest, Death01 | quaternius.com | Quaternius | CC0 1.0 |
 | assets/anim2.glb | Universal Animation Library 2 (Standard): Slide_Start/Loop/Exit, Hit_Knockback, NinjaJump_* | quaternius.com | Quaternius | CC0 1.0 |
 | assets/city.glb | Downtown City MegaKit (Standard/free): buildings, 4-lane street, sidewalk planter, bollard, manhole, AC unit, planter | quaternius.com | Quaternius | CC0 1.0 |
-| assets/props.glb | Car Kit: sedan, taxi, suv, van, police, cone · City Kit Roads: construction-barrier, traffic-light, light-curved | kenney.nl | Kenney | CC0 1.0 |
+| assets/props.glb | Car Kit: sedan, taxi, suv, van, police, cone · City Kit Roads: construction-barrier, traffic-light, light-curved, dumpster · **Train Kit 1.1** (v4.1): train-tram-modern, train-tram-classic, train-tram-round, train-electric-square-a, train-electric-city-a · **City Kit Commercial** (v4.1): detail-parasol-a, detail-parasol-b | kenney.nl (Train Kit License.txt: "Creative Commons Zero, CC0") | Kenney | CC0 1.0 |
 | assets/robot.glb | RobotExpressive (Idle/Running/Walking/Punch/Wave) | three.js examples (Quaternius model, D. McCurdy mods) | Quaternius | CC0 1.0 |
 | lib/* | three.js r170, GLTFLoader, SkeletonUtils, BufferGeometryUtils, meshopt decoder | npm three@0.170.0 | three.js authors / zeux | MIT |
+| lib/pp/* (v4.1) | three.js r170 post-processing: EffectComposer, RenderPass, ShaderPass, OutputPass, UnrealBloomPass, GTAOPass (+ shaders, SimplexNoise); GTAOPass patched to skip sprites/transparent FX | npm three@0.170.0 | three.js authors | MIT |
+
+Procedural (code-generated, no external files): road/tram-track texture, striped awnings, tram wires and poles, sky, clouds, particles, UI icons.

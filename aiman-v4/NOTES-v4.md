@@ -106,3 +106,14 @@ Deploy only `index.html`, `game.js`, `audio.js`, `lib/`, `assets/` and (optional
 - **Clear view of the hero:** in the chase view, nothing is drawn between the camera and the hero. Obstacles in the hero's line that are already behind him are hidden, and so are checkpoint arches once passed and missed cards or RAM chips behind him. Cars in other lanes stay visible.
 - **Bug fix:** obstacle rotation (parked cars and the police car's sideways crossing) had been disabled by an editing slip in round 1. It is restored.
 - **Checked:** 390×844 and 1280×720 screenshots of running, jumping, sliding, a hit and the police crossing. No console errors.
+
+## v4.1 (Zizo feedback: controls flip in chase camera, heavy feel, graphics → "Subway Surfers level")
+- **Screen-relative controls:** `act()` now records screen-relative input; `processInput()` multiplies by `screenSign()` = sign(cos(camera orbit angle)). When the camera swings round to the front for the robot chase, right still moves the hero to the right of the screen. The demo AI passes `world=true`. Lean and swipe-sound pan use the screen direction. Test: `_tools/dirtest.mjs` (projects hero vs road centre to screen-x before/after ArrowRight/ArrowLeft in both camera modes).
+- **Snappier feel:** lane switch is a fixed 130 ms ease-out (was an exponential follow, ~200 ms to 95%). Gravity 48 / jump 15.2 (0.63 s airtime, same height), slide 0.7 s, fast-fall −30. Speed 13.5 → 20.5 m/s (was 12 → 18.5), start ramp 0.8→1 in ~1 s. Input buffer 240 ms, swipe threshold ~3% of the short screen side, quick flicks that end before the threshold are caught on pointerup. Animation cross-fades 50–100 ms.
+- **Look:** bright sunny daytime palette (blue sky, white-warm sun, stronger hemisphere fill), Neutral tone mapping + saturation grade, PCF soft shadows up to 4096 px, PMREM sky reflections, fresnel rim light and ink outline on the hero, procedural tram-track road with lane markings, striped colourful shop awnings, cafe parasols, dumpsters, tram wires/poles, saturated facade tints.
+- **New CC0 models:** Kenney Train Kit trams/metro cars as obstacles (parked "tram yard" pairs with one open lane, and oncoming trams with headlights). Hero textures now 1024 px base + 1024 px normal/roughness (was 512 px for the detail maps).
+- **Quality tiers** (`?q=0..3` to force; auto-picked; auto-lowered if the average frame time over 2.5 s exceeds 22 ms):
+  - 3 Ultra (desktop default): DPR up to 2, 4096 shadows, MSAA×4 HDR composer, GTAO ambient occlusion, bloom, vignette.
+  - 2 High (mobile default): DPR ≤ 1.6, 1024–2048 shadows, composer with bloom + vignette (no GTAO).
+  - 1 Medium: direct render with MSAA, DPR ≤ 1.35–1.5, 1024 shadows.
+  - 0 Low (weak GPU / WebGL1): DPR 1, 1024 PCF shadows.
