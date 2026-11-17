@@ -3,6 +3,8 @@ Run inside the LatentSync repo dir with its own venv. Usage: python ls_runner.py
 jobs.json = [{"video": ..., "audio": ..., "out": ...}, ...]
 """
 import json, os, sys, time, traceback
+os.environ["MPLBACKEND"] = "Agg"   # Colab exports an inline backend the venv lacks (latentsync.utils.util imports matplotlib)
+import matplotlib; matplotlib.use("Agg")
 import torch
 if torch.cuda.is_available():
     try:
