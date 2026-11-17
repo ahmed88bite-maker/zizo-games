@@ -117,3 +117,4 @@ Deploy only `index.html`, `game.js`, `audio.js`, `lib/`, `assets/` and (optional
   - 2 High (mobile default): DPR ≤ 1.6, 1024–2048 shadows, composer with bloom + vignette (no GTAO).
   - 1 Medium: direct render with MSAA, DPR ≤ 1.35–1.5, 1024 shadows.
   - 0 Low (weak GPU / WebGL1): DPR 1, 1024 PCF shadows.
+- **Verified (v4.1):** full `?autoplay=1&demo=1` run in headless Chrome on zii-desktop's real GPU (AMD Radeon integrated, D3D11): 0 hits, 153 cards, end screen at ~117 s, zero console errors or warnings. Auto quality started at tier 2 (bloom), held 45–60 fps, then stepped down to tier 1 at ~62 s and held 50–60 fps. The direction test passes in both camera modes; the v4 build fails it in the front camera. Demo AI obstacle sampling is now ~2 m (it used to skip short obstacles).

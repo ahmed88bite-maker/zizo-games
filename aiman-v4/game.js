@@ -1094,8 +1094,8 @@ function demoAI() {
     for (const o of streams.obst.active) {
       if (kinds && !kinds.includes(o.t)) continue;
       // predict where obstacle is when we reach it
-      for (let k = 0; k <= 4; k++) {
-        const ds = dist0 + (dist1 - dist0) * k / 4;
+      for (let k = 0; k <= 16; k++) { // ~2 m steps: coarse steps could skip short obstacles (cones, a van)
+        const ds = dist0 + (dist1 - dist0) * k / 16;
         obBox(o, P.s + ds, ob_);
         const zH = -(P.s + ds);
         if (ob_.z0 - 0.6 < zH && ob_.z1 + 0.6 > zH && ob_.x0 < LANES[lane + 1] + 0.5 && ob_.x1 > LANES[lane + 1] - 0.5) return o;
@@ -1560,7 +1560,7 @@ loadAll().then(() => {
   warm.forEach(([, g], i) => g.position.set(0, 0, -20 - i * 3)); W.book.visible = true; robot.pivot.visible = true;
   try { renderer.compile(scene, camera); } catch (_) { }
   warm.forEach(([t, g]) => vput(t, g)); scene.remove(gw, gf); W.book.visible = false; robot.pivot.visible = false;
-  window.__aiman = { start: startGame, G, P, sun, hero, camera, scene, THREE, FX, act, CO, QUAL, setTier, LANES, LV };
+  window.__aiman = { start: startGame, G, P, sun, hero, camera, scene, THREE, FX, act, CO, QUAL, setTier, LANES, LV, inBuf };
   if (AUTOPLAY) startGame();
 }).catch(err => {
   console.warn('load failed', err);
