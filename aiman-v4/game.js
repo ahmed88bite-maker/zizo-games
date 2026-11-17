@@ -7,6 +7,12 @@ import { GLTFLoader } from './lib/GLTFLoader.js';
 import { MeshoptDecoder } from './lib/meshopt_decoder.module.js';
 import { mergeGeometries } from './lib/BufferGeometryUtils.js';
 import { A } from './audio.js';
+import { EffectComposer } from './lib/pp/EffectComposer.js';
+import { RenderPass } from './lib/pp/RenderPass.js';
+import { ShaderPass } from './lib/pp/ShaderPass.js';
+import { OutputPass } from './lib/pp/OutputPass.js';
+import { UnrealBloomPass } from './lib/pp/UnrealBloomPass.js';
+import { GTAOPass } from './lib/pp/GTAOPass.js';
 
 // ---------------------------------------------------------------- params / env
 const Q = new URLSearchParams(location.search);
@@ -31,8 +37,9 @@ const compose = (x, y, z, ry = 0, sx = 1, sy = sx, sz = sx, rx = 0, rz = 0) => n
 const LANE_W = 2.4, LANES = [-LANE_W, 0, LANE_W];
 const L = 1850;                       // level length (m)  ≈ 120 s
 const CPS = [0, 320, 545, 830, 1040, 1280, 1590]; // checkpoints (respawn points)
-const GRAV = 40, JUMP_V = 13.6, FASTFALL_V = -24, SLIDE_T = 0.78;
-const speedAt = s => 12 + 6.5 * clamp(s / L, 0, 1);
+const GRAV = 48, JUMP_V = 15.2, FASTFALL_V = -30, SLIDE_T = 0.7;
+const LANE_T = 0.13;                  // lane switch duration (s) — snappy, Subway-style
+const speedAt = s => 13.5 + 7 * clamp(s / L, 0, 1);
 const ROAD_HALF = 9, WALK_W = 6, BLD_X = ROAD_HALF + WALK_W; // building fronts at ±15
 const VIEW_AHEAD = isMobile ? 195 : 225, VIEW_BEHIND = 30;
 
@@ -40,17 +47,30 @@ const VIEW_AHEAD = isMobile ? 195 : 225, VIEW_BEHIND = 30;
 const canvas = $('c');
 let renderer;
 try {
-  renderer = new THREE.WebGLRenderer({ canvas, antialias: !isMobile, powerPreference: 'high-performance', stencil: false });
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance', stencil: false });
 } catch (e) {
   $('loadP').textContent = '×'; throw e;
 }
-const DPR = Math.min(window.devicePixelRatio || 1, isMobile ? 1.5 : 2);
-renderer.setPixelRatio(DPR);
+// ---- quality tiers: 3 ultra (GTAO + bloom + grade, MSAA x4), 2 high (bloom + grade), 1 medium (direct, MSAA), 0 low (DPR 1, small shadows)
+// Picked from the device, overridable with ?q=0..3, and lowered automatically if the frame rate sags.
+const QP = Q.get('q');
+const gl0 = renderer.getContext();
+const isWebGL2 = renderer.capabilities.isWebGL2;
+const gpuName = (() => { try { const e = gl0.getExtension('WEBGL_debug_renderer_info'); return e ? String(gl0.getParameter(e.UNMASKED_RENDERER_WEBGL)) : ''; } catch (_) { return ''; } })();
+const weakGPU = /SwiftShader|llvmpipe|Mali-4|Mali-T|Adreno \(TM\) [3-5]\d\d|PowerVR SGX|Intel\(R\) (HD|UHD) Graphics [2-6]\d\d\b/i.test(gpuName);
+const QUAL = {
+  tier: QP !== null && QP !== '' ? clamp(+QP | 0, 0, 3) : !isWebGL2 ? 0 : isMobile ? (weakGPU ? 0 : 2) : (weakGPU ? 1 : 3),
+  forced: QP !== null && QP !== '',
+};
+const DPR_MAX = Math.min(window.devicePixelRatio || 1, 2);
+const dprFor = t => t >= 3 ? DPR_MAX : t === 2 ? Math.min(DPR_MAX, isMobile ? 1.6 : 2) : t === 1 ? Math.min(DPR_MAX, isMobile ? 1.35 : 1.5) : 1;
+renderer.setPixelRatio(dprFor(QUAL.tier));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.12;
+// Neutral tone mapping keeps the bright, saturated "cartoon city" palette (ACES washes reds/blues out).
+renderer.toneMapping = THREE.NeutralToneMapping;
+renderer.toneMappingExposure = 1.05;
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.type = QUAL.tier >= 1 ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
 const maxAniso = Math.min(8, renderer.capabilities.getMaxAnisotropy());
 
 const scene = new THREE.Scene();
@@ -59,16 +79,16 @@ camera.position.set(0, 2.5, 6);
 
 // ---------------------------------------------------------------- sky / fog / lights
 const SKY = {
-  top: new THREE.Color('#4a63b0'), mid: new THREE.Color('#d99aa6'), hor: new THREE.Color('#ffcf98'),
-  glow: new THREE.Color('#ffa860'), gnd: new THREE.Color('#5d4a4c'),
+  top: new THREE.Color('#1f6fe0'), mid: new THREE.Color('#5aa8ff'), hor: new THREE.Color('#cfe9ff'),
+  glow: new THREE.Color('#fff1c4'), gnd: new THREE.Color('#7d7a78'),
 };
-scene.fog = new THREE.Fog(SKY.hor.clone(), 55, VIEW_AHEAD - 12);
+scene.fog = new THREE.Fog(SKY.hor.clone(), 70, VIEW_AHEAD - 8);
 scene.background = SKY.hor.clone();
 function makeSkyMat(forEnv) {
   return new THREE.ShaderMaterial({
     uniforms: {
       top: { value: SKY.top }, mid: { value: SKY.mid }, hor: { value: SKY.hor }, glow: { value: SKY.glow }, gnd: { value: SKY.gnd },
-      gdir: { value: V3(-0.32, 0.05, -1).normalize() }, env: { value: forEnv ? 1 : 0 },
+      gdir: { value: V3(-0.45, 0.42, -1).normalize() }, env: { value: forEnv ? 1 : 0 },
     },
     vertexShader: `varying vec3 vD;
 void main(){ vD = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
@@ -78,7 +98,7 @@ void main(){
   vec3 c = mix(hor, mid, smoothstep(0.02, 0.25, h));
   c = mix(c, top, smoothstep(0.22, 0.8, h));
   float s = max(dot(d, gdir), 0.0);
-  c += glow * (pow(s, 6.0) * 0.45 + pow(s, 60.0) * 0.9 + pow(s, 900.0) * 5.0);
+  c += glow * (pow(s, 8.0) * 0.35 + pow(s, 80.0) * 0.8 + pow(s, 1400.0) * 6.0);
   vec3 g = env > 0.5 ? gnd : hor * 0.95;
   c = mix(c, g, smoothstep(0.0, -0.08, h));
   gl_FragColor = vec4(c, 1.0);
@@ -89,25 +109,81 @@ void main(){
   });
 }
 const sky = new THREE.Mesh(new THREE.SphereGeometry(800, 32, 16), makeSkyMat(false));
-sky.renderOrder = -10; sky.frustumCulled = false;
+sky.renderOrder = -10; sky.frustumCulled = false; sky.userData.noAO = true;
 scene.add(sky);
 { // environment map from the sky (gives glass/cars real reflections)
   const envScene = new THREE.Scene();
   envScene.add(new THREE.Mesh(new THREE.SphereGeometry(50, 32, 16), makeSkyMat(true)));
   const pm = new THREE.PMREMGenerator(renderer);
   scene.environment = pm.fromScene(envScene, 0.02).texture;
-  scene.environmentIntensity = 0.75;
+  scene.environmentIntensity = 0.9;
   pm.dispose();
 }
-const hemi = new THREE.HemisphereLight('#ffe2bf', '#6a5060', 0.55);
+const hemi = new THREE.HemisphereLight('#d6ecff', '#b59a7c', 1.05);
 scene.add(hemi);
-const sun = new THREE.DirectionalLight('#ffc98a', 4.2);
-const SUN_OFF = V3(13, 12, 17);
+const sun = new THREE.DirectionalLight('#fff0d8', 3.4);
+const SUN_OFF = V3(12, 24, 14);
 sun.castShadow = true;
-sun.shadow.mapSize.set(isMobile ? 1024 : 2048, isMobile ? 1024 : 2048);
-Object.assign(sun.shadow.camera, { left: -17, right: 17, top: 24, bottom: -24, near: 1, far: 90 });
-sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.04;
+const SHADOW_RES = [1024, 1024, 2048, 4096][QUAL.tier] * (isMobile && QUAL.tier >= 2 ? 0.5 : 1);
+sun.shadow.mapSize.set(SHADOW_RES, SHADOW_RES);
+Object.assign(sun.shadow.camera, { left: -17, right: 17, top: 26, bottom: -26, near: 1, far: 90 });
+sun.shadow.bias = -0.0003; sun.shadow.normalBias = 0.035; sun.shadow.radius = 3;
 scene.add(sun, sun.target);
+
+// ---- colour grade inside tone mapping (applies on every tier): a touch more saturation for the bright cartoon-city look
+THREE.ShaderChunk.tonemapping_pars_fragment = THREE.ShaderChunk.tonemapping_pars_fragment.replace('vec3 NeutralToneMapping( vec3 color ) {', 'vec3 NeutralToneMapping0( vec3 color ) {')
+  + '\nvec3 NeutralToneMapping( vec3 color ) { vec3 c = NeutralToneMapping0( color ); float l = dot( c, vec3( 0.2126, 0.7152, 0.0722 ) ); return clamp( mix( vec3( l ), c, 1.16 ), 0.0, 1.0 ); }\n';
+
+// ---- post-processing (tiers 2-3): MSAA HDR target -> [GTAO] -> bloom -> tone map/sRGB -> vignette
+const GradeShader = {
+  uniforms: { tDiffuse: { value: null }, vig: { value: 0.22 } },
+  vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: `uniform sampler2D tDiffuse; uniform float vig; varying vec2 vUv;
+void main(){ vec4 c = texture2D(tDiffuse, vUv); vec2 d = vUv - 0.5; c.rgb = (c.rgb - 0.5) * 1.03 + 0.5; c.rgb *= 1.0 - vig * dot(d, d) * 1.8; gl_FragColor = vec4(clamp(c.rgb, 0.0, 1.0), c.a); }`,
+};
+const PP = { composer: null, bloom: null, gtao: null };
+function buildPost() {
+  if (PP.composer) { PP.composer.renderTarget1.dispose(); PP.composer.renderTarget2.dispose(); for (const ps of PP.composer.passes) ps.dispose && ps.dispose(); }
+  PP.composer = PP.bloom = PP.gtao = null;
+  if (QUAL.tier < 2) return;
+  const w = innerWidth, h = innerHeight, pr = renderer.getPixelRatio();
+  const rt = new THREE.WebGLRenderTarget(Math.floor(w * pr), Math.floor(h * pr), { type: THREE.HalfFloatType, samples: isWebGL2 ? 4 : 0 });
+  const c = new EffectComposer(renderer, rt);
+  c.setPixelRatio(pr); c.setSize(w, h);
+  c.addPass(new RenderPass(scene, camera));
+  if (QUAL.tier >= 3) {
+    const g = new GTAOPass(scene, camera, Math.floor(w * pr), Math.floor(h * pr));
+    g.output = GTAOPass.OUTPUT.Default; g.blendIntensity = 0.9;
+    g.updateGtaoMaterial({ radius: 0.9, distanceExponent: 1.6, thickness: 1.2, scale: 1.0, samples: 12, distanceFallOff: 1.0 });
+    g.updatePdMaterial({ lumaPhi: 10, depthPhi: 2, normalPhi: 3, radius: 5, rings: 2, samples: 10 });
+    c.addPass(g); PP.gtao = g;
+  }
+  PP.bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 0.28, 0.5, 1.6); // only HDR-hot pixels: neon cards, arches, glints, sun
+  c.addPass(PP.bloom);
+  c.addPass(new OutputPass());
+  c.addPass(new ShaderPass(GradeShader));
+  PP.composer = c;
+}
+function setTier(t) {
+  t = clamp(t, 0, 3); if (t === QUAL.tier && PP.composer !== undefined && QUAL.built) return;
+  QUAL.tier = t; QUAL.built = true;
+  renderer.setPixelRatio(dprFor(t));
+  const res = [1024, 1024, 2048, 4096][t] * (isMobile && t >= 2 ? 0.5 : 1);
+  if (sun.shadow.mapSize.x !== res) { sun.shadow.mapSize.set(res, res); if (sun.shadow.map) { sun.shadow.map.dispose(); sun.shadow.map = null; } }
+  buildPost();
+  if (typeof resize === 'function' && camW > 1) resize();
+}
+// auto-lower quality when the frame rate sags (never raises again mid-run, so no ping-pong)
+const AQ = { acc: 0, n: 0, cool: 4 };
+function adaptQuality(rdt) {
+  if (QUAL.forced || G.state !== 'run' || G.paused || QUAL.tier === 0) { AQ.acc = AQ.n = 0; return; }
+  AQ.cool -= rdt; if (AQ.cool > 0) return;
+  AQ.acc += rdt; AQ.n++;
+  if (AQ.acc >= 2.5) {
+    const avg = AQ.acc / AQ.n; AQ.acc = AQ.n = 0;
+    if (avg > 1 / 45) { setTier(QUAL.tier - 1); AQ.cool = 3; }
+  }
+}
 
 // ---------------------------------------------------------------- canvas textures
 function canvasTex(w, h, draw, { repeat = false, srgb = true } = {}) {
@@ -137,6 +213,24 @@ const TEX = {
     g.fillStyle = '#0b1f14'; for (let i = 0; i < 4; i++) { rr(g, 14 + i * 60, 16, 46, 40, 4); g.fill(); }
     g.fillStyle = '#ffd36b'; for (let i = 0; i < 20; i++) g.fillRect(8 + i * 12.4, h - 20, 7, 18);
   }),
+  // tram-track road overlay for the 3 play lanes: 8.4 m wide x 6 m long, tiles along the street
+  road: canvasTex(512, 512, (g, w, h) => {
+    const R = rng(31), px = w / 8.4, cx = m => w / 2 + m * px;
+    g.fillStyle = '#5a5b66'; g.fillRect(0, 0, w, h);
+    for (let k = 0; k < 9000; k++) { const c = R() < 0.5 ? 0 : 255; g.fillStyle = `rgba(${c},${c},${c},${R() * 0.07})`; g.fillRect(R() * w, R() * h, 2, 2); }
+    for (const lx of [-2.4, 0, 2.4]) {
+      // track bed: warm paving between and around the rails
+      g.fillStyle = 'rgba(150,110,90,.30)'; g.fillRect(cx(lx - 0.95), 0, 1.9 * px, h);
+      for (let y = 0; y < h; y += 22) { g.fillStyle = 'rgba(40,30,30,.18)'; g.fillRect(cx(lx - 0.95), y, 1.9 * px, 2); }
+      for (const rx of [-0.72, 0.72]) {
+        g.fillStyle = '#24242b'; g.fillRect(cx(lx + rx) - 5, 0, 10, h);   // groove
+        g.fillStyle = '#d9dde6'; g.fillRect(cx(lx + rx) - 3, 0, 5, h);    // polished rail head
+        g.fillStyle = 'rgba(255,255,255,.8)'; g.fillRect(cx(lx + rx) - 1, 0, 1.5, h);
+      }
+    }
+    g.fillStyle = '#f4f1e8'; for (const m of [-1.2, 1.2]) g.fillRect(cx(m) - 3, h * 0.08, 6, h * 0.42); // dashed lane dividers
+    g.fillStyle = '#ffd23a'; for (const m of [-4.1, 4.1]) g.fillRect(cx(m) - 4, 0, 8, h);              // solid yellow edges
+  }, { repeat: true }),
   pave: canvasTex(512, 512, (g, w) => {
     g.fillStyle = '#b9a99a'; g.fillRect(0, 0, w, w);
     const R = rng(7);
@@ -180,7 +274,7 @@ const clouds = new THREE.Group(); scene.add(clouds);
 {
   const R = rng(11);
   for (let i = 0; i < 9; i++) {
-    const m = new THREE.SpriteMaterial({ map: TEX.cloud, color: new THREE.Color().setHSL(0.04 + R() * 0.05, 0.9, 0.8 + R() * 0.1), transparent: true, opacity: 0.75, fog: false, depthWrite: false });
+    const m = new THREE.SpriteMaterial({ map: TEX.cloud, color: new THREE.Color().setHSL(0.58, 0.35, 0.96 + R() * 0.04), transparent: true, opacity: 0.9, fog: false, depthWrite: false });
     const sp = new THREE.Sprite(m); const a = -Math.PI / 2 + (R() - 0.5) * 2.2;
     sp.position.set(Math.cos(a) * 520, 60 + R() * 150, Math.sin(a) * 520); sp.scale.set(220 + R() * 160, 70 + R() * 40, 1);
     clouds.add(sp);
@@ -190,7 +284,7 @@ const clouds = new THREE.Group(); scene.add(clouds);
 // ---------------------------------------------------------------- loading
 const loader = new GLTFLoader();
 loader.setMeshoptDecoder(MeshoptDecoder);
-const FILES = { hero: 294760, anim1: 175548, anim2: 128368, city: 2488736, props: 96820, robot: 168064 };
+const FILES = { hero: 541292, anim1: 175548, anim2: 128368, city: 2488736, props: 195388, robot: 168064 };
 const loaded = {};
 function setLoad(p) { $('loadF').style.width = (p * 100).toFixed(1) + '%'; $('loadP').textContent = Math.floor(p * 100) + '%'; }
 function loadAll() {
@@ -203,7 +297,7 @@ function loadAll() {
 }
 
 // ---------------------------------------------------------------- helpers for assets
-const glassMat = new THREE.MeshStandardMaterial({ color: '#2a3f5c', metalness: 0.95, roughness: 0.06, envMapIntensity: 1.6 });
+const glassMat = new THREE.MeshStandardMaterial({ color: '#4f7fb8', metalness: 0.9, roughness: 0.05, envMapIntensity: 1.9 });
 function fixCityMaterials(root) {
   const done = new Set();
   root.traverse(o => {
@@ -212,7 +306,8 @@ function fixCityMaterials(root) {
     const m = o.material; if (done.has(m)) return; done.add(m);
     m.vertexColors = false;
     if (m.map) m.map.anisotropy = maxAniso;
-    if (/FakeInterior/.test(m.name)) { m.emissive = new THREE.Color('#ffd7a8'); m.emissiveMap = m.map; m.emissiveIntensity = 0.32; }
+    if (/FakeInterior/.test(m.name)) { m.emissive = new THREE.Color('#ffd7a8'); m.emissiveMap = m.map; m.emissiveIntensity = 0.14; }
+    if (m.color && /Brick|Concrete|Plaster|Wall/.test(m.name)) { m.roughness = Math.min(m.roughness ?? 1, 0.85); }
     if (m.name === 'MI_StreetDecals') { m.depthWrite = false; m.polygonOffset = true; m.polygonOffsetFactor = -2; m.polygonOffsetUnits = -2; }
   });
 }
@@ -393,12 +488,12 @@ function buildWorld() {
     return { name: n, pool: new InstPool(t, 40, { tint: brickTint }), minx: b.min.x, maxx: b.max.x, w: b.max.x - b.min.x, h: b.max.y };
   });
   const street = get(city, 'Street_4Lane');
-  W.street = new InstPool(street, 64, { receive: true });
+  W.street = new InstPool(street, 96, { receive: true });
   W.planterWide = new InstPool(get(city, 'Sidewalk_Planter'), 40, { receive: true });
   W.planter = new InstPool(get(city, 'Prop_Planter_Single'), 30, { receive: true });
-  W.bollard = new InstPool(get(city, 'Prop_Bollard'), 80);
+  W.bollard = new InstPool(get(city, 'Prop_Bollard'), 150);
   W.manhole = new InstPool(get(city, 'Prop_ManholeCover'), 30, { receive: true });
-  W.ac = new InstPool(get(city, 'Prop_ACUnit'), 60);
+  W.ac = new InstPool(get(city, 'Prop_ACUnit'), 120);
   // props (kenney) — single shared colormap material
   const kenMat = (() => { let m; props.traverse(o => { if (o.isMesh && !m) m = o.material; }); return m; })();
   kenMat.roughness = 0.42; kenMat.metalness = 0.15; kenMat.envMapIntensity = 1.2;
@@ -409,15 +504,45 @@ function buildWorld() {
   W.lamp = new InstPool(bakeMesh('light-curved'), 40);
   W.tlight = new InstPool(bakeMesh('traffic-light'), 16);
   W.parked = {}; for (const n of ['sedan', 'taxi', 'suv', 'van']) W.parked[n] = new InstPool(W.carMesh[n], 14, { cast: true });
+  // v4.1: trams / metro cars (Kenney Train Kit) — two cab-ended cars coupled back to back, ~10 m long, full-lane obstacles
+  W.tramNames = ['train-tram-modern', 'train-tram-classic', 'train-tram-round', 'train-electric-square-a', 'train-electric-city-a'];
+  W.tramLen = {};
+  for (const n of W.tramNames) { const mm = bakeMesh(n); mm.material = mm.material.clone(); mm.material.roughness = 0.38; mm.material.metalness = 0.2; mm.material.envMapIntensity = 1.3; W.carMesh[n] = mm; const bb = mm.geometry.boundingBox; W.tramLen[n] = (bb.max.z - bb.min.z) * 1.95; }
+  // shop awnings + cafe parasols + dumpsters (Kenney City Kit Commercial / Roads) — per-instance colours
+  const anyTint = () => true;
+  const solid = n => { const mm = bakeMesh(n); mm.material = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.62, metalness: 0, side: THREE.DoubleSide }); return mm; };
+  { // striped shop awning: sloped canvas + front valance, built at the wall (local +Z = out to the street)
+    const t = canvasTex(128, 64, (g, w, h) => { for (let i = 0; i < 8; i++) { g.fillStyle = i % 2 ? '#ffffff' : '#9a9a9a'; g.fillRect(i * w / 8, 0, w / 8, h); } g.fillStyle = 'rgba(0,0,0,.18)'; g.fillRect(0, h - 6, w, 6); }, { repeat: true });
+    const slope = new THREE.PlaneGeometry(4.2, 1.7); slope.rotateX(-Math.PI / 2 + 0.42); slope.translate(0, -0.35, 0.78);
+    const val = new THREE.PlaneGeometry(4.2, 0.38); val.translate(0, -0.9, 1.56);
+    const am = new THREE.MeshStandardMaterial({ map: t, color: '#ffffff', roughness: 0.7, side: THREE.DoubleSide });
+    W.awning = new InstPool(new THREE.Mesh(mergeGeometries([slope, val]), am), 170, { tint: anyTint, cast: QUAL.tier >= 2 });
+  }
+  W.parasol = new InstPool(solid('detail-parasol-a'), 60, { tint: anyTint });
+  W.parasolB = new InstPool(solid('detail-parasol-b'), 60, { tint: anyTint });
+  W.dumpster = new InstPool(bakeMesh('dumpster'), 16, { tint: anyTint });
+  // overhead tram wires (follow the hero like the road overlay) + span poles
+  const wireMat = new THREE.MeshStandardMaterial({ color: '#2b2d33', roughness: 0.5, metalness: 0.6 });
+  W.wires = new THREE.Group();
+  for (const lx of [-(ROAD_HALF - 0.4), ROAD_HALF - 0.4]) { const wv = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.035, 360), wireMat); wv.position.set(lx, 5.75, 0); W.wires.add(wv); }
+  scene.add(W.wires);
+  const poleG = mergeGeometries([new THREE.CylinderGeometry(0.11, 0.14, 6.4, 8).translate(0, 3.2, 0)]);
+  const span = new THREE.BoxGeometry(2 * (ROAD_HALF + 0.3), 0.035, 0.035).translate(0, 5.75, 0);
+  W.wirePole = new InstPool(new THREE.Mesh(poleG, new THREE.MeshStandardMaterial({ color: '#3d6e5a', roughness: 0.45, metalness: 0.55 })), 24);
+  W.wireSpan = new InstPool(new THREE.Mesh(span, wireMat), 12);
   // sidewalk slabs (6 x 6 m) with curb
   const walkGeo = new THREE.BoxGeometry(WALK_W, 0.18, 6);
   const walkMat = new THREE.MeshStandardMaterial({ map: TEX.pave, roughness: 0.92, metalness: 0 });
   W.ground = new THREE.Mesh(new THREE.PlaneGeometry(120, 600).rotateX(-Math.PI / 2), new THREE.MeshStandardMaterial({ color: '#34323a', roughness: 0.95 }));
   W.ground.position.y = -0.04; W.ground.receiveShadow = false; scene.add(W.ground);
-  W.walk = new InstPool(new THREE.Mesh(walkGeo, walkMat), 140, { receive: true });
+  // tram tracks + lane markings over the 3 play lanes (world-aligned, follows the hero in 6 m steps)
+  TEX.road.repeat.set(1, 60);
+  W.road = new THREE.Mesh(new THREE.PlaneGeometry(8.4, 360).rotateX(-Math.PI / 2), new THREE.MeshStandardMaterial({ map: TEX.road, roughness: 0.78, metalness: 0.05, envMapIntensity: 0.6, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }));
+  W.road.position.y = 0.006; W.road.receiveShadow = true; scene.add(W.road);
+  W.walk = new InstPool(new THREE.Mesh(walkGeo, walkMat), 180, { receive: true });
   // trees (stylized, in planters)
   const trunkMat = new THREE.MeshStandardMaterial({ color: '#6b4a32', roughness: 0.9 });
-  const leafMat = new THREE.MeshStandardMaterial({ color: '#5e9a3a', roughness: 0.85, flatShading: true });
+  const leafMat = new THREE.MeshStandardMaterial({ color: '#4fbf3a', roughness: 0.75, flatShading: true });
   const tree = new THREE.Group();
   const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.18, 3.0, 6), trunkMat); trunk.position.y = 1.5; tree.add(trunk);
   const crown = new THREE.Mesh(mergeGeometries([
@@ -427,12 +552,12 @@ function buildWorld() {
   // zebra crossing stripes
   W.zebra = new InstPool(new THREE.Mesh(new THREE.PlaneGeometry(0.7, 4).rotateX(-Math.PI / 2), new THREE.MeshStandardMaterial({ color: '#f4efe6', roughness: 0.8, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })), 120, { receive: true });
   // lamp glows (instanced additive quads)
-  const glowMat = new THREE.MeshBasicMaterial({ map: TEX.glow, color: '#ffc477', transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: false, side: THREE.DoubleSide });
+  const glowMat = new THREE.MeshBasicMaterial({ map: TEX.glow, color: '#ffc477', opacity: 0.3, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: false, side: THREE.DoubleSide });
   W.lampGlow = new InstPool(new THREE.Mesh(new THREE.PlaneGeometry(1.6, 1.6), glowMat), 40);
 
   // collectibles
-  W.cardMat = new THREE.MeshStandardMaterial({ map: TEX.card, emissive: '#ffffff', emissiveMap: TEX.card, emissiveIntensity: 0.85, roughness: 0.3, metalness: 0.1 });
-  W.ramMat = new THREE.MeshStandardMaterial({ map: TEX.ram, emissive: '#ffffff', emissiveMap: TEX.ram, emissiveIntensity: 0.75, roughness: 0.35, metalness: 0.3 });
+  W.cardMat = new THREE.MeshStandardMaterial({ map: TEX.card, emissive: '#ffffff', emissiveMap: TEX.card, emissiveIntensity: 1.6, roughness: 0.3, metalness: 0.1 });
+  W.ramMat = new THREE.MeshStandardMaterial({ map: TEX.ram, emissive: '#ffffff', emissiveMap: TEX.ram, emissiveIntensity: 1.5, roughness: 0.35, metalness: 0.3 });
   W.cardIM = new THREE.InstancedMesh(new THREE.BoxGeometry(0.5, 0.7, 0.05), W.cardMat, 90);
   W.ramIM = new THREE.InstancedMesh(new THREE.BoxGeometry(0.95, 0.36, 0.06), W.ramMat, 16);
   W.glowIM = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ map: TEX.glow, color: '#ffffff', transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }), 110);
@@ -476,11 +601,18 @@ function buildWorld() {
     }
     return g;
   };
+  const tram = (type) => () => {
+    const g = new THREE.Group(); const len = W.tramLen[type];
+    for (const k of [1, -1]) { const m = W.carMesh[type].clone(); m.castShadow = true; m.scale.setScalar(1.95); m.position.z = k * (len / 2 + 0.08); if (k < 0) m.rotation.y = Math.PI; g.add(m); }
+    const hl = new THREE.Group(); hl.visible = false; for (const x of [-0.62, 0.62]) { const sp = gl(); sp.scale.setScalar(1.3); sp.position.set(x, 0.95, len + 0.2); hl.add(sp); } g.add(hl); g.userData.hl = hl;
+    return g;
+  };
   W.fact = { cones: coneRow, barrier, gantry: () => gantry(false), gantryW: () => gantry(true), sedan: car('sedan'), taxi: car('taxi'), suv: car('suv'), van: car('van'), police: car('police') };
+  for (const n of W.tramNames) W.fact[n] = tram(n);
   W.vpool = {};
 
   // checkpoint gate (arch)
-  const archMat = new THREE.MeshBasicMaterial({ color: '#7ff6ff', fog: false });
+  const archMat = new THREE.MeshBasicMaterial({ color: new THREE.Color('#7ff6ff').multiplyScalar(1.35), fog: false });
   W.gateFactory = (final) => {
     const g = new THREE.Group();
     const R = final ? 8.2 : 7.4;
@@ -516,6 +648,27 @@ function buildHero() {
   const m = loaded.hero.scene;
   m.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = false; o.frustumCulled = false; o.material.vertexColors = false; if (o.material.map) o.material.map.anisotropy = maxAniso; } });
   const sm = m.getObjectByName('SuperHero_Male'); if (sm) { sm.material.roughness = 0.42; sm.material.envMapIntensity = 1.1; }
+  // v4.1 stylised hero: fresnel rim light (reads clearly against the street from any camera angle) ...
+  m.traverse(o => {
+    if (!o.isSkinnedMesh) return;
+    const mat = o.material;
+    mat.onBeforeCompile = sh => {
+      sh.uniforms.uRim = { value: new THREE.Color('#cfeeff').multiplyScalar(0.42) };
+      sh.fragmentShader = 'uniform vec3 uRim;\n' + sh.fragmentShader.replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+  { float rimF = 1.0 - clamp(dot(normal, normalize(vViewPosition)), 0.0, 1.0); totalEmissiveRadiance += uRim * pow(rimF, 4.0); }`);
+    };
+    mat.customProgramCacheKey = () => 'heroRim';
+    mat.needsUpdate = true;
+  });
+  // ... and a thin inverted-hull ink outline on the body (cartoon read, like mobile runners)
+  if (sm && sm.isSkinnedMesh) {
+    const om = new THREE.MeshBasicMaterial({ color: '#141a33', side: THREE.BackSide });
+    om.onBeforeCompile = sh => { sh.vertexShader = sh.vertexShader.replace('#include <begin_vertex>', 'vec3 transformed = vec3( position ) + normalize( objectNormal ) * OUTW;'); };
+    om.defines = { OUTW: (0.011 / (1.8 / Math.max(0.01, new THREE.Box3().setFromObject(m, true).getSize(V3()).y))).toFixed(5) };
+    om.customProgramCacheKey = () => 'heroOutline';
+    const ol = new THREE.SkinnedMesh(sm.geometry, om); ol.bind(sm.skeleton, sm.bindMatrix); ol.castShadow = false; ol.frustumCulled = false; ol.name = 'heroOutline';
+    sm.parent.add(ol);
+  }
   hero.mixer = new THREE.AnimationMixer(m);
   for (const c of [...loaded.anim1.animations, ...loaded.anim2.animations]) { const a = hero.mixer.clipAction(cleanClip(c)); hero.act[c.name] = a; }
   for (const n of ['Jump_Start', 'Jump_Land', 'NinjaJump_Start', 'NinjaJump_Land', 'Slide_Start', 'Slide_Exit', 'Hit_Knockback', 'Hit_Chest', 'Death01', 'Roll']) { const a = hero.act[n]; if (a) { a.setLoop(THREE.LoopOnce, 1); a.clampWhenFinished = true; } }
@@ -574,6 +727,7 @@ function robotPlay(n, fade = 0.3) { const a = robot.act[n]; if (!a || robot.cur 
 
 // ---------------------------------------------------------------- level generation
 const LV = { obst: [], items: [], decor: [], events: [], gates: [] };
+const AWN = ['#ff4d5e', '#ffb81c', '#2fc4ff', '#43d17a', '#b06bff', '#ff7ac8', '#ff8a2a', '#ffffff'].map(h => new THREE.Color(h));
 function genLevel() {
   const R = rng(20251117);
   const pick = a => a[Math.floor(R() * a.length)];
@@ -597,6 +751,12 @@ function genLevel() {
       if (r() < 0.12) D.push({ s0: s, s1: s + 6, pool: 'planter', m: compose(side * (BLD_X - 1.8), 0.18, -(s + 3), 0, 0.9) });
     }
     if (r() < 0.18) D.push({ s0: s, s1: s + 6, pool: 'manhole', m: compose(pick([-4.5, 4.5, -6.5, 6.5]), 0.01, -(s + 3)) });
+    if (!inCross && k % 6 === 3) { for (const side of [-1, 1]) D.push({ s0: s, s1: s + 6, pool: 'wirePole', m: compose(side * (ROAD_HALF + 0.35), 0.18, -(s + 3)) }); D.push({ s0: s, s1: s + 6, pool: 'wireSpan', m: compose(0, 0, -(s + 3)) }); }
+    if (!inCross) for (const side of [-1, 1]) {
+      const q = r();
+      if (q < 0.16) { const pc = pick(AWN); for (const dz of [-1.4, 1.4]) D.push({ s0: s, s1: s + 6, pool: r() < 0.5 ? 'parasol' : 'parasolB', m: compose(side * (BLD_X - 2.4), 0.18, -(s + 3 + dz), r() * 6, 6.2), c: pc }); }
+      else if (q < 0.21) D.push({ s0: s, s1: s + 6, pool: 'dumpster', m: compose(side * (BLD_X - 1.0), 0.18, -(s + 3), side < 0 ? Math.PI / 2 : -Math.PI / 2, 6.5), c: pick(AWN) });
+    }
   }
   // crossings: side street tiles, zebra stripes, traffic lights
   for (const c of crossings) {
@@ -611,7 +771,7 @@ function genLevel() {
     for (const side of [-1, 1]) { const bt = pick([0, 1, 2]); D.push({ s0: c - 20, s1: c + 20, pool: 'b' + bt, m: compose(side * 40, 0, -c, side < 0 ? Math.PI / 2 : -Math.PI / 2, 1), c: null }); }
   }
   // buildings on both sides, packed along the street
-  const tints = ['#ffffff', '#ffe0cc', '#dbe6ff', '#fff0b8', '#ead6ff', '#d6f5e6', '#ffd0d0'].map(h => new THREE.Color(h));
+  const tints = ['#ffffff', '#ffc9a6', '#b9d2ff', '#fff09a', '#dcbcff', '#b4f0cf', '#ffb8b8', '#ffd6ef', '#a9f0ff'].map(h => new THREE.Color(h));
   for (const side of [-1, 1]) {
     let s = -250; let last = -1;
     while (s < L + 320) {
@@ -624,6 +784,8 @@ function genLevel() {
       const ys = 0.92 + R() * 0.3;
       const z0 = side < 0 ? -(s + w) + bt.maxx : -(s + w) - bt.minx;
       D.push({ s0: s, s1: s + w, pool: 'b' + ti, m: compose(side * BLD_X, 0, z0, side < 0 ? Math.PI / 2 : -Math.PI / 2, 1, ys, 1), c: pick(tints) });
+      // colourful shop awnings over the ground floor
+      if (R() < 0.85) { const na = Math.max(1, Math.floor((w - 1) / 4.6)); const ac = pick(AWN); for (let k = 0; k < na; k++) D.push({ s0: s, s1: s + w, pool: 'awning', m: compose(side * (BLD_X - 0.05), 4.0, -(s + (k + 0.5) * w / na), side < 0 ? Math.PI / 2 : -Math.PI / 2, Math.min(1, (w / na - 0.4) / 4.2), 1, 1), c: ac }); }
       // AC units on facades
       if (R() < 0.6) for (let k = 0; k < 2; k++) D.push({ s0: s, s1: s + w, pool: 'ac', m: compose(side * (BLD_X - 0.05), 6 + R() * (bt.h * ys - 9), -(s + 2 + R() * (w - 4)), side < 0 ? Math.PI / 2 : -Math.PI / 2, 1.5) });
       s += w + 0.15;
@@ -651,6 +813,7 @@ function genLevel() {
   const highRow = (lane, s, wide) => ob({ t: 'high', v: wide ? 'gantryW' : 'gantry', lane: wide ? 0 : lane, s, hw: wide ? 3 * LANE_W / 2 + 0.6 : 1.2, hd: 0.2, y0: 1.18, y1: 3.6 });
   const parked = (lane, s) => ob({ t: 'full', v: pick(carNames), lane, s, hw: 1.1, hd: 2.0, y0: 0, y1: 1.95, rot: R() < 0.5 ? Math.PI : 0 });
   const oncoming = (lane, s, k = 0.5) => ob({ t: 'full', v: pick(carNames), lane, s, hw: 1.1, hd: 2.0, y0: 0, y1: 1.95, move: 'oncoming', k, rot: 0 });
+  const tramOb = (lane, s, move, k = 0.5) => { const v = pick(W.tramNames); return ob({ t: 'full', v, lane, s, hw: 1.12, hd: W.tramLen[v] + 0.1, y0: 0, y1: 3.2, rot: 0, ...(move ? { move: 'oncoming', k } : {}) }); };
   const laneFreeUntil = [0, 0, 0];
   const hints = LV.events;
   // tutorial
@@ -678,8 +841,11 @@ function genLevel() {
         for (const l of [-1, 0, 1]) lowRow(l, s, 'barrier'); arc(pick([-1, 0, 1]), s, R() < 0.3);
       } else if (r < 0.24 && d > 0.1) { // full-width slide
         highRow(0, s, true); line(pick([-1, 0, 1]), s - 4, 4, 2.4);
-      } else if (r < 0.42 && d > 0.2) { // oncoming car (telegraphed)
-        const l = pick([-1, 0, 1]); oncoming(l, s, 0.45 + d * 0.4); laneFreeUntil[l + 1] = s + 95;
+      } else if (r < 0.36 && d > 0.06) { // tram yard: two parked trams, staggered, one lane open (Subway-style read)
+        const ls = [-1, 0, 1].sort(() => R() - 0.5); tramOb(ls[0], s, false); tramOb(ls[1], s + 12, false);
+        line(ls[2], s - 6, 6, 3); s += 20;
+      } else if (r < 0.5 && d > 0.2) { // oncoming car (telegraphed)
+        const l = pick([-1, 0, 1]); if (R() < 0.55) tramOb(l, s, true, 0.4 + d * 0.35); else oncoming(l, s, 0.45 + d * 0.4); laneFreeUntil[l + 1] = s + 95;
         const other = pick([-1, 0, 1].filter(x => x !== l)); line(other, s - 8, 5);
       } else {
         const n = R() < 0.25 + d * 0.55 ? 2 : 1;
@@ -689,7 +855,7 @@ function genLevel() {
           const q = R();
           if (q < 0.34) { lowRow(l, s, R() < 0.5 ? 'cones' : 'barrier'); if (R() < 0.5) arc(l, s, R() < 0.25); }
           else if (q < 0.6) highRow(l, s, false);
-          else if (fulls < 1) { parked(l, s); fulls++; }
+          else if (fulls < 1) { if (R() < 0.45) tramOb(l, s, false); else parked(l, s); fulls++; }
           else lowRow(l, s, 'cones');
         }
         const free = [-1, 0, 1].filter(l => !lanes.includes(l));
@@ -771,7 +937,7 @@ const G = {
   state: 'loading', paused: false, t: 0, ts: 1, freeze: 0, trauma: 0, camMode: 'cover',
   score: 0, cards: 0, rams: 0, hits: 0, combo: 0, mult: 1, lastCP: 0, cpPassed: new Set(), dist: 0,
 };
-const P = { s: 0, x: 0, lane: 0, y: 0, vy: 0, air: false, slide: 0, wantSlide: false, inv: 0, speedMul: 1, v: 0, hitT: 0, fly: null, zOff: 0, dustT: 0, squash: 0, fastFall: false, leanV: 0, prevX: 0 };
+const P = { s: 0, x: 0, lane: 0, y: 0, vy: 0, air: false, slide: 0, wantSlide: false, inv: 0, speedMul: 1, v: 0, hitT: 0, fly: null, zOff: 0, dustT: 0, squash: 0, fastFall: false, leanV: 0, prevX: 0, lx0: 0, lt: 1 };
 let streams = null;
 const activeVis = new Map(); // obstacle id -> group
 const gateVis = new Map();
@@ -793,12 +959,16 @@ function makeStreams() {
 }
 function flushPools() {
   for (const bt of W.bTypes) bt.pool.flush();
-  for (const k of ['street', 'walk', 'planterWide', 'planter', 'bollard', 'manhole', 'ac', 'lamp', 'lampGlow', 'tlight', 'tree', 'zebra']) W[k].flush();
+  for (const k of ['street', 'walk', 'planterWide', 'planter', 'bollard', 'manhole', 'ac', 'lamp', 'lampGlow', 'tlight', 'tree', 'zebra', 'awning', 'parasol', 'parasolB', 'dumpster', 'wirePole', 'wireSpan']) W[k].flush();
   for (const k in W.parked) W.parked[k].flush();
 }
 
 // ---------------------------------------------------------------- input
-function act(a) { if (G.state !== 'run' || G.paused) return; inBuf.push({ a, t: G.t }); }
+// Input is SCREEN-relative: 'left'/'right' from keys/swipes mean left/right as the player sees it.
+// When the camera swings round to face the hero (robot chase shots), world +X is screen-left, so we flip.
+// world=true is used by the demo AI, which reasons in world lanes.
+function act(a, world = false) { if (G.state !== 'run' || G.paused) return; inBuf.push({ a, t: G.t, world }); }
+function screenSign() { return Math.cos(CO.th) < 0 ? -1 : 1; } // camera right vector = (cos th, 0, -sin th)
 const KEYS = { ArrowLeft: 'left', KeyA: 'left', ArrowRight: 'right', KeyD: 'right', ArrowUp: 'up', KeyW: 'up', Space: 'up', ArrowDown: 'down', KeyS: 'down' };
 addEventListener('keydown', e => {
   unlockAudio();
@@ -810,12 +980,19 @@ let tp = null;
 canvas.addEventListener('pointerdown', e => { unlockAudio(); tp = { x: e.clientX, y: e.clientY, id: e.pointerId, used: false }; try { canvas.setPointerCapture(e.pointerId); } catch (_) { } });
 canvas.addEventListener('pointermove', e => {
   if (!tp || tp.id !== e.pointerId) return;
-  const dx = e.clientX - tp.x, dy = e.clientY - tp.y, th = Math.max(24, Math.min(innerWidth, innerHeight) * 0.045);
+  const dx = e.clientX - tp.x, dy = e.clientY - tp.y, th = Math.max(16, Math.min(innerWidth, innerHeight) * 0.03);
   if (Math.abs(dx) < th && Math.abs(dy) < th) return;
   if (Math.abs(dx) > Math.abs(dy)) act(dx > 0 ? 'right' : 'left'); else act(dy < 0 ? 'up' : 'down');
   tp.x = e.clientX; tp.y = e.clientY; tp.used = true;
 });
-const endTouch = e => { if (tp && tp.id === e.pointerId) tp = null; };
+const endTouch = e => {
+  if (tp && tp.id === e.pointerId) {
+    // very quick short flicks can end before pointermove crosses the threshold: never drop them
+    const dx = e.clientX - tp.x, dy = e.clientY - tp.y;
+    if (!tp.used && e.type === 'pointerup' && Math.max(Math.abs(dx), Math.abs(dy)) > 10) { if (Math.abs(dx) > Math.abs(dy)) act(dx > 0 ? 'right' : 'left'); else act(dy < 0 ? 'up' : 'down'); }
+    tp = null;
+  }
+};
 canvas.addEventListener('pointerup', endTouch); canvas.addEventListener('pointercancel', endTouch);
 for (const ev of ['touchstart', 'touchmove']) document.addEventListener(ev, e => { if (e.target === canvas || e.target === document.body || ev === 'touchmove') e.preventDefault(); }, { passive: false });
 document.addEventListener('gesturestart', e => e.preventDefault());
@@ -845,7 +1022,7 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) toggl
 function resetWorldAt(s) {
   if (streams) { streams.obst.reset(); streams.items.reset(); }
   FX.dust.clear(); FX.spark.clear(); FX.star.clear();
-  P.s = s; P.x = 0; P.lane = 0; P.y = 0; P.vy = 0; P.air = false; P.slide = 0; P.wantSlide = false; P.fly = null; P.zOff = 0; P.fastFall = false;
+  P.s = s; P.x = 0; P.lx0 = 0; P.lt = 1; P.lane = 0; P.y = 0; P.vy = 0; P.air = false; P.slide = 0; P.wantSlide = false; P.fly = null; P.zOff = 0; P.fastFall = false;
   hero.model.rotation.set(0, Math.PI, 0); hero.model.position.set(0, 0, 0); hero.stars.visible = false;
   for (const o of LV.obst) { o.honked = false; o.near = false; o.passed = false; }
   for (const e of LV.events) { e.done = false; e.shown = false; }
@@ -861,7 +1038,7 @@ function startGame() {
   for (const it of LV.items) it.dead = false;
   W.book.visible = false;
   resetWorldAt(START_S); placeTraffic(true); G.lastCP = CPS.filter(c => c <= START_S).pop() || 0;
-  P.inv = 0; P.speedMul = 0.7;
+  P.inv = 0; P.speedMul = 0.8;
   playA('Sprint_Loop', 0.25);
   updateHUD(true);
   document.querySelectorAll('.tick').forEach(t => t.classList.remove('ok'));
@@ -871,20 +1048,20 @@ function startGame() {
 
 // ---------------------------------------------------------------- per-frame gameplay
 const heroBox = { x0: 0, x1: 0, y0: 0, y1: 0, z0: 0, z1: 0 }, ob_ = { x0: 0, x1: 0, y0: 0, y1: 0, z0: 0, z1: 0 };
-function changeLane(d) {
+function changeLane(d, sd = d) { // d: world lane step, sd: on-screen direction (for lean + stereo pan)
   const nl = clamp(P.lane + d, -1, 1); if (nl === P.lane) { G.trauma = Math.max(G.trauma, 0.12); return; }
-  P.lane = nl; if (audioOn) A.sfx('swipe', d);
-  P.leanV = d;
+  P.lane = nl; if (audioOn) A.sfx('swipe', sd);
+  P.leanV = sd; P.lx0 = P.x; P.lt = 0;
 }
 function jump() {
   P.air = true; P.vy = JUMP_V; P.slide = 0; P.wantSlide = false; P.fastFall = false;
-  playA('NinjaJump_Start', 0.08, 1.7, 0.22);
+  playA('NinjaJump_Start', 0.05, 1.9, 0.22);
   P.squash = -1; if (audioOn) A.sfx('jump');
   footDust(6, 2.5);
 }
 function startSlide() {
   P.slide = SLIDE_T; P.wantSlide = false;
-  playA('Slide_Start', 0.08, 2.2, 0.15);
+  playA('Slide_Start', 0.05, 2.4, 0.15);
   if (audioOn) A.sfx('slide');
 }
 const _fw = V3();
@@ -900,9 +1077,10 @@ function footDust(n, spd) { const p = _v.set(P.x, 0.1, -P.s + P.zOff); burst(FX.
 function processInput() {
   while (inBuf.length) {
     const b = inBuf[0];
-    if (G.t - b.t > 0.14) { inBuf.shift(); continue; }
-    if (b.a === 'left') { changeLane(-1); inBuf.shift(); }
-    else if (b.a === 'right') { changeLane(1); inBuf.shift(); }
+    if (G.t - b.t > 0.24) { inBuf.shift(); continue; } // buffered ~a quarter second: a jump pressed just before landing still fires
+    const f = b.world ? 1 : screenSign();
+    if (b.a === 'left') { changeLane(-f, -1); inBuf.shift(); }
+    else if (b.a === 'right') { changeLane(f, 1); inBuf.shift(); }
     else if (b.a === 'up') { if (!P.air) { jump(); inBuf.shift(); } else break; }
     else if (b.a === 'down') { if (P.air) { P.vy = Math.min(P.vy, FASTFALL_V); P.wantSlide = true; P.fastFall = true; } else startSlide(); inBuf.shift(); }
     else inBuf.shift();
@@ -931,14 +1109,14 @@ function demoAI() {
       const opts = [P.lane - 1, P.lane + 1, P.lane - 2, P.lane + 2].filter(l => l >= -1 && l <= 1);
       for (const l of opts) {
         const path = Math.abs(l - P.lane) === 2 ? [P.lane + Math.sign(l - P.lane), l] : [l];
-        if (path.every(pl => !blocked(pl, 0, look, ['full']))) { act(l < P.lane ? 'left' : 'right'); return; }
+        if (path.every(pl => !blocked(pl, 0, look, ['full']))) { act(l < P.lane ? 'left' : 'right', true); return; }
       }
     }
   }
   if (!blocked(P.lane, 0, look, null) && Math.abs(P.x - LANES[P.lane + 1]) < 0.2) {
     let best = null;
     for (const it of streams.items.active) { const d = it.s - P.s; if (!it.dead && d > 4 && d < 30 && (!best || d < best.s - P.s)) best = it; }
-    if (best) { const bl = LANES.indexOf(best.x) - 1; if (bl !== P.lane && bl >= -1) { const nl = P.lane + Math.sign(bl - P.lane); if (!blocked(nl, 0, look, null)) { act(nl < P.lane ? 'left' : 'right'); return; } } }
+    if (best) { const bl = LANES.indexOf(best.x) - 1; if (bl !== P.lane && bl >= -1) { const nl = P.lane + Math.sign(bl - P.lane); if (!blocked(nl, 0, look, null)) { act(nl < P.lane ? 'left' : 'right', true); return; } } }
   }
   for (const o of streams.obst.active) {
     if (o.t === 'full') continue;
@@ -957,12 +1135,13 @@ function overlaps(a, b, zPad = 0) { return a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < 
 
 function updateRun(dt) {
   processInput(); demoAI(); processInput();
-  P.speedMul = Math.min(1, P.speedMul + dt * 0.1);
+  P.speedMul = Math.min(1, P.speedMul + dt * 0.22);
   const v = speedAt(P.s) * P.speedMul;
   P.v = v;
   const prevS = P.s; P.s += v * dt; G.dist = P.s;
   P.prevX = P.x;
-  P.x = damp(P.x, LANES[P.lane + 1], 15, dt);
+  // fixed-time ease-out lane switch (~130 ms) instead of a soft exponential follow
+  P.lt = Math.min(1, P.lt + dt / LANE_T); { const u = 1 - P.lt; P.x = lerp(P.lx0, LANES[P.lane + 1], 1 - u * u * u); }
   P.leanV = damp(P.leanV, 0, 6, dt);
   // vertical
   if (P.air) {
@@ -972,7 +1151,7 @@ function updateRun(dt) {
       P.y = 0; P.air = false; P.vy = 0; P.squash = 1;
       if (audioOn) A.sfx('land');
       footDust(10, 3); G.trauma = Math.max(G.trauma, P.fastFall ? 0.25 : 0.1); P.fastFall = false;
-      if (P.wantSlide) startSlide(); else playA('Sprint_Loop', 0.12, 1, 0.1);
+      if (P.wantSlide) startSlide(); else playA('Sprint_Loop', 0.07, 1, 0.1);
       G.fovKick -= 2.5;
     }
   }
@@ -980,11 +1159,11 @@ function updateRun(dt) {
     P.slide -= dt;
     if (hero.cur === hero.act.Slide_Start && P.slide < SLIDE_T - 0.22) playA('Slide_Loop', 0.12, 1.2);
     if (Math.random() < 0.6) { const p = _v.set(P.x + rand(-0.3, 0.3), 0.1, -P.s + 0.4); FX.spark.emit(p.x, p.y, p.z, rand(-1.5, 1.5), rand(1, 3), rand(1, 4), 0.35, 0.18, 0.05, COL.gold, 8, 1); }
-    if (P.slide <= 0) { P.slide = 0; playA('Sprint_Loop', 0.18, 1, 0.2); }
+    if (P.slide <= 0) { P.slide = 0; playA('Sprint_Loop', 0.1, 1, 0.2); }
   }
   // running dust
   if (!P.air && P.slide <= 0) footContacts();
-  if (hero.cur === hero.act.Sprint_Loop) hero.cur.timeScale = 0.75 + v / 34;
+  if (hero.cur === hero.act.Sprint_Loop) hero.cur.timeScale = 0.82 + v / 30;
   P.inv = Math.max(0, P.inv - dt);
   // collisions (swept along z)
   heroHitbox(); const sweep = P.s - prevS;
@@ -1220,10 +1399,11 @@ function updateCamera(dt, rdt) {
   const sh = G.trauma * G.trauma;
   if (sh > 0.001) { const t = performance.now() * 0.001; camera.position.x += sh * 0.35 * Math.sin(t * 61.3); camera.position.y += sh * 0.3 * Math.sin(t * 47.1 + 1); camera.rotateZ(sh * 0.04 * Math.sin(t * 53.7 + 2)); }
   G.fovKick = damp(G.fovKick, 0, 5, rdt);
-  const speedF = G.state === 'run' ? clamp((P.v - 12) / 7, 0, 1) * 7 : 0;
+  const speedF = G.state === 'run' ? clamp((P.v - 13.5) / 7, 0, 1) * 7 : 0;
   const fov = cp.fov + speedF + G.fovKick + (P.air && G.state === 'run' ? 2.5 : 0);
   if (Math.abs(camera.fov - fov) > 0.01) { camera.fov = damp(camera.fov, fov, 6, rdt); camera.updateProjectionMatrix(); }
   if (W.ground) W.ground.position.set(0, -0.04, hz - 200);
+  if (W.road) { W.road.position.z = Math.round(hz / 6) * 6 - 60; W.wires.position.z = W.road.position.z; }
   sky.position.copy(camera.position); clouds.position.set(camera.position.x, 0, camera.position.z);
   // sun + shadow camera follow the hero
   sun.target.position.set(P.x * 0.5, 0, hz - 12); sun.position.copy(sun.target.position).add(SUN_OFF);
@@ -1316,6 +1496,7 @@ let last0 = performance.now(), last = performance.now(), fpsAcc = 0, fpsN = 0, f
 function resize() {
   const w = innerWidth, h = innerHeight; camW = w; camH = h;
   renderer.setSize(w, h, false); camera.aspect = w / h; camera.userData.vo = -1; camera.updateProjectionMatrix();
+  if (PP.composer) { PP.composer.setPixelRatio(renderer.getPixelRatio()); PP.composer.setSize(w, h); }
   const sc = renderer.domElement.height / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
   for (const k in FX) FX[k].mat.uniforms.uScale.value = sc;
 }
@@ -1344,7 +1525,9 @@ function loop() {
   if (G.state !== 'cover') updateTraffic(dt);
   if (robot.mixer && robot.pivot.visible) robot.mixer.update(dt);
   // streams (cheap) & pools
-  streams.decor.update(P.s - (G.state === 'cover' ? 190 : VIEW_BEHIND), P.s + (G.state === 'cover' ? 40 : VIEW_AHEAD));
+  // when the camera looks back (robot front shots, finish orbit) stream the city behind the hero too, so there is no void
+  const lookBack = G.camMode === 'front' || G.camMode === 'finish' || Math.abs(CO.th) > 0.25;
+  streams.decor.update(P.s - (G.state === 'cover' ? 190 : lookBack ? 150 : VIEW_BEHIND), P.s + (G.state === 'cover' ? 40 : lookBack ? 170 : VIEW_AHEAD));
   streams.obst.update(P.s - 12, P.s + VIEW_AHEAD - 20);
   streams.items.update(P.s - 6, P.s + 190);
   streams.gates.update(P.s - 20, P.s + 260);
@@ -1354,13 +1537,15 @@ function loop() {
   for (const k in FX) FX[k].update(dt);
   if (G.state === 'run' || G.state === 'hit') updateHUD();
   if (audioOn && G.state === 'run') A.setIntensity(clamp((P.v - 10) / 9, 0.3, 1));
-  renderer.render(scene, camera);
+  if (PP.composer) PP.composer.render(rdt); else renderer.render(scene, camera);
+  adaptQuality(rdt);
   frame++;
   dbgT -= rdt;
-  if (dbgT <= 0) { dbgT = 0.5; window.__dbg = { state: G.state, s: Math.round(P.s), lane: P.lane, fps: Math.round(fps), calls: renderer.info.render.calls, tris: renderer.info.render.triangles, hits: G.hits, cards: G.cards, rams: G.rams, score: Math.floor(G.score), cam: G.camMode, worstMs: Math.round(G.worst || 0) }; G.worst = 0; }
+  if (dbgT <= 0) { dbgT = 0.5; window.__dbg = { state: G.state, s: Math.round(P.s), lane: P.lane, fps: Math.round(fps), calls: renderer.info.render.calls, tris: renderer.info.render.triangles, hits: G.hits, cards: G.cards, rams: G.rams, score: Math.floor(G.score), cam: G.camMode, worstMs: Math.round(G.worst || 0), tier: QUAL.tier, dpr: renderer.getPixelRatio() }; G.worst = 0; }
 }
 
 // ---------------------------------------------------------------- boot
+setTier(QUAL.tier);
 resize();
 renderer.setAnimationLoop(loop);
 loadAll().then(() => {
@@ -1375,7 +1560,7 @@ loadAll().then(() => {
   warm.forEach(([, g], i) => g.position.set(0, 0, -20 - i * 3)); W.book.visible = true; robot.pivot.visible = true;
   try { renderer.compile(scene, camera); } catch (_) { }
   warm.forEach(([t, g]) => vput(t, g)); scene.remove(gw, gf); W.book.visible = false; robot.pivot.visible = false;
-  window.__aiman = { start: startGame, G, P, sun, hero, camera, scene, THREE, FX };
+  window.__aiman = { start: startGame, G, P, sun, hero, camera, scene, THREE, FX, act, CO, QUAL, setTier, LANES, LV };
   if (AUTOPLAY) startGame();
 }).catch(err => {
   console.warn('load failed', err);
