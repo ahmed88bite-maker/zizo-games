@@ -1,0 +1,16 @@
+{
+  "fps": 25,
+  "width": 480,
+  "height": 832,
+  "scenes": [
+    {"id": 1, "image": "s1.jpg", "line": 1,
+     "prompt": "A young woman with long wavy blonde balayage hair, wearing a black Christmas-print off-shoulder pajama set, stands in a bright cozy living room and talks warmly to the camera. She smiles, nods slightly and moves her head naturally while speaking, with a small relaxed hand gesture. Her clothes stay exactly the same. Static camera, medium shot, soft natural daylight, realistic smartphone video."},
+    {"id": 2, "image": "s2.jpg", "line": 2,
+     "prompt": "A young woman with long wavy blonde balayage hair and a red reindeer antler headband, wearing a red off-shoulder ribbed top and red-white reindeer print pajama pants, stands next to a decorated Christmas tree and talks to the camera. She smiles and moves her head gently while speaking, subtle natural body sway. Her clothes stay exactly the same. Static camera, soft warm light, realistic smartphone video."},
+    {"id": 3, "image": "s3.jpg", "line": 3,
+     "prompt": "Close-up of a smiling young woman with wavy blonde balayage hair and a reindeer antler headband, wearing a red off-shoulder ribbed top, talking to the camera with an excited expression. Small natural head movements and blinking. Her clothes stay exactly the same. Static camera, soft bright light, realistic smartphone video."},
+    {"id": 4, "image": "s4.jpg", "line": 4,
+     "prompt": "A young woman with long wavy blonde balayage hair, wearing a red and white Christmas sweater dress with a snowman pattern, stands in a festive living room with a lit Christmas tree and talks to the camera. She smiles and tilts her head slightly while speaking, subtle natural movement. Her clothes stay exactly the same. Static camera, warm cozy light, realistic smartphone video."}
+  ],
+  "negative_prompt": "worst quality, inconsistent motion, blurry, jittery, distorted, deformed face, changing clothes, extra limbs, text, watermark"
+}
