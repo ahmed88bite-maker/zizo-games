@@ -15,3 +15,10 @@ Runtime → Change runtime type → **T4 GPU**, then **Runtime → Run all**. Ou
 a 6 s Gemini-Aoede reference clip, our synthesised Jingle Bells bed (public-domain tune), pre-rendered Arabic captions,
 the original Aoede lines (last-resort fallback) and pre-computed T5 prompt embeddings for LTX.
 `stages/*.py` are the per-stage scripts the notebook downloads and runs.
+
+## Changelog
+- **run 2 fixes (17 Nov 2026):** LTX denoise and VAE decode are now separate phases. The transformer is parked on the CPU during
+  decode. The decode order is plain → spatial tiles → temporal tiles; diffusers' temporal tiling causes streaks, so it's last.
+  On CUDA OOM the clip drops to 384×672, then to 65 frames. Clips are capped at 97 frames and `expandable_segments` is on.
+  OOMs are logged to `clips/i2v_errors.log`. `MPLBACKEND=Agg` is forced for every stage, which fixes the LatentSync crash.
+  If LatentSync loses the face for a few frames it reuses the nearest detection. The final cell now downloads the zip as well.
